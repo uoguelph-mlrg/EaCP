@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.jit
 
-from data import imagenet_r_mask
+from datasets import imagenet_r_mask
 
 
 class Tent(nn.Module):

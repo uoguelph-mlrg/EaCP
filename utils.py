@@ -20,22 +20,21 @@ def pinball_loss_grad(y, yhat, q: float):
     return -q * (y > yhat) + (1 - q) * (y < yhat)
 
 
-def split_conformal(results_dict: dict, in1k_path: str, alpha: float):
+def split_conformal(results_dict: dict, cal_path: str, alpha: float):
     # # # # # # # # CALIBRATION # # # # # # #
     print('Calibrating conformal')
-    print('Working on ImageNet')
 
     # start by loading and calibrating on imagenet1k validation set
-    in1k_data = np.load(in1k_path)
-    in1k_smx = in1k_data['smx']  # get softmax scores
-    in1k_labels = in1k_data['labels'].astype(int)
+    data = np.load(cal_path)
+    smx = data['smx']  # get softmax scores
+    labels = data['labels'].astype(int)
 
     # Split the softmax scores into calibration and validation sets
-    n = int(len(in1k_labels) * 0.5)
-    idx = np.array([1] * n + [0] * (in1k_smx.shape[0] - n)) > 0
+    n = int(len(labels) * 0.5)
+    idx = np.array([1] * n + [0] * (smx.shape[0] - n)) > 0
     np.random.shuffle(idx)
-    cal_smx, val_smx = in1k_smx[idx, :], in1k_smx[~idx, :]
-    cal_labels, val_labels = in1k_labels[idx], in1k_labels[~idx]
+    cal_smx, val_smx = smx[idx, :], smx[~idx, :]
+    cal_labels, val_labels = labels[idx], labels[~idx]
 
     # find quantiles for the entropy of the prediction distribution
     cal_ent, val_ent = smx_entropy(torch.Tensor(cal_smx)).numpy(), smx_entropy(torch.Tensor(val_smx)).numpy()
@@ -68,9 +67,22 @@ def split_conformal(results_dict: dict, in1k_path: str, alpha: float):
 
 def update_cp(output_ent, upper_q, cal_smx, cal_labels, alpha):
     # adjust the entropy quantile to ensure entropy coverage
-    loss = pinball_loss_grad(upper_q, output_ent.cpu().detach().numpy(), 0.1).mean()
+    loss = pinball_loss_grad(upper_q, output_ent.cpu().detach().numpy(), alpha).mean()
     upper_q += loss
 
+    # Re-calibrate, using the calibration dataset, and the new entropy quantile
+    tau_thr = cp.calibrate_threshold(cal_smx / upper_q, cal_labels,
+                                     alpha)  # deflate scores by the entropy quantile
+
+    return upper_q, tau_thr
+
+
+def update_cp_batch(output_ent, upper_q, cal_smx, cal_labels, alpha):
+    # adjust the entropy quantile to ensure entropy coverage
+    # loss = pinball_loss_grad(upper_q, output_ent.cpu().detach().numpy(), 0.1).mean()
+    # upper_q += loss
+    upper_q = np.quantile(output_ent.cpu().detach().numpy(),
+                          1-alpha)  # using the 90th quantile of just batch not whole dist
     # Re-calibrate, using the calibration dataset, and the new entropy quantile
     tau_thr = cp.calibrate_threshold(cal_smx / upper_q, cal_labels,
                                      alpha)  # deflate scores by the entropy quantile
@@ -92,3 +104,11 @@ def t_to_sev(t, window, run_length=500, schedule=None):
         return (k if k <= 5 else 10 - k) * np.random.randint(1, 2)
     return 5 * ((t_base // run_length) % 2)  # default: sudden schedule
 
+
+def t2sev(t,  run_length=7, schedule=None):
+    t_base = t
+    if schedule == "gradual":
+        k = (t_base // run_length) % 10
+        return k if k <= 5 else 10 - k
+    else:
+        return 5 * ((t_base // run_length) % 2)  # default: sudden schedule

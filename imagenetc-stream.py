@@ -1,14 +1,16 @@
 import argparse
 import csv
+import pickle
 from pathlib import Path
 
 import torch
 import torchvision
 import numpy as np
 from tqdm import tqdm
+from matplotlib import pyplot as plt
 import pdb
 
-import data
+import datasets
 import models
 import utils
 import tent
@@ -23,10 +25,8 @@ def get_args_parser():
     parser.add_argument('--cal-path', type=str,
                         default=r'/scratch/ssd004/scratch/kkasa/inference_results/IN1k/imagenet-resnet50.npz',
                         help='Location of calibration data (e.g. imagenet1k validation set.)')
-    parser.add_argument('--dataset', type=str,
-                        help='Choose from [imagenet-r, imagenet-a, imagenet-v2, imagenet-c, rxrx1, fmow, iwildcam]')
     parser.add_argument('--corruption', type=str, default='contrast', help='Corruption type for imagenet-c')
-    parser.add_argument('--severity', type=int, default=1, help='Severity level for imagenet-c')
+    parser.add_argument('--schedule', type=str, default='sudden', help='[sudden, gradual]')
 
     # training args
     parser.add_argument('--batch-size', type=int, default=64, help='Batch size for TTA')
@@ -45,18 +45,23 @@ def get_args_parser():
 
 
 def evaluate(args):
-    print(f'Working on {args.dataset}')
+    print(f'Working on {args.corruption}')
 
     results = {}
-    save_name = Path(args.save_name)
-    save_loc = 'results' / save_name
+    save_name = Path(args.save_name + '.csv')
+    save_folder = Path(f'results/{args.corruption}')
+    save_folder.mkdir(parents=True, exist_ok=True)
+    save_loc = save_folder / save_name
 
     results_dict, tau_thr, upper_q, lower_q, cal_smx, cal_labels = utils.split_conformal(results, args.cal_path,
                                                                                          args.alpha)
 
-    dataloader, mask = data.get_data(data_name=args.dataset, args=args)
+    sev_datasets = datasets.INc_stream_single(args.corruption)
+    sev_datasets[0] = datasets.IN1k()
 
-    model = models.get_model(args.dataset, args.model)
+    mask = None
+
+    model = models.get_model('imagenet-c', args.model)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
@@ -70,7 +75,21 @@ def evaluate(args):
     cov = []
     sizes = []
     ent_covs = []
-    for batch in tqdm(dataloader):
+    sevs = []
+    # the following assumes batch_size=64 TODO: make modular
+    if args.schedule == 'gradual':
+        run_length = 78
+    else:
+        run_length = 156
+    total_run = 780  # total number of samples; 780*64 ~=50,000
+
+    for t in tqdm(range(total_run)):
+        sev = utils.t2sev(t, run_length=run_length, schedule=args.schedule)
+        if sev == 0:
+            sev = 1
+        loader = torch.utils.data.DataLoader(sev_datasets[sev], batch_size=args.batch_size, shuffle=True)
+        batch = next(iter(loader))
+        sevs.append(sev)
         images, labels = batch[0], batch[1]
         images, labels = images.to(device), labels.to(device)
 
@@ -82,10 +101,10 @@ def evaluate(args):
         correct += (outputs.argmax(1) == labels).sum()
         seen += outputs.shape[0]
 
-        output_ent = utils.logit_entropy(outputs)  # get entropy from logits
+        output_ent = utils.logit_entropy(outputs)  # get enrtopy from logits
 
         if args.ucp:  # update entropy quantile
-            upper_q, tau_thr = utils.update_cp_batch(output_ent, upper_q, cal_smx, cal_labels, args.alpha)
+            upper_q, tau_thr = utils.update_cp(output_ent, upper_q, cal_smx, cal_labels, args.alpha)
 
         ent_covs.append(((lower_q <= output_ent) & (output_ent <= upper_q)).sum() / len(output_ent))
 
@@ -107,9 +126,25 @@ def evaluate(args):
     results['ood_cov'] = np.mean(cov)
     results['ood_size'] = np.mean(sizes)
 
+    # plt.plot(cov, color='green', label='Empirical Coverage')
+    # plt.plot(sevs, color='black', label='Severity Level')
+    # plt.xlabel('Time')
+    # plt.ylabel()
+    # plt.legend()
+    # plt.savefig(save_folder / 'results.pdf', format="pdf", bbox_inches="tight")
+
     with open(save_loc, 'w') as f:
         w = csv.writer(f)
         w.writerows(results.items())
+
+    with open(save_folder / f'{args.save_name}-covs.pkl', "wb") as fp:  # save coverage stats for further processing
+        pickle.dump(cov, fp)
+
+    with open(save_folder / f'{args.save_name}-sevs.pkl', "wb") as fp:  # save coverage stats for further processing
+        pickle.dump(sevs, fp)
+
+    with open(save_folder / f'{args.save_name}-sizes.pkl', "wb") as fp:  # save coverage stats for further processing
+        pickle.dump(sizes, fp)
 
 
 def setup_tent(model, mask=None):
