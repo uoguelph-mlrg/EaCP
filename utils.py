@@ -3,24 +3,16 @@ import torch.nn
 import torchvision
 
 import conformal_prediction as cp
+from uncertainty_functions import smx_entropy
 import evaluation
-
-
-def logit_entropy(x: torch.Tensor) -> torch.Tensor:
-    """Entropy of softmax distribution from logits."""
-    return -(x.softmax(1) * x.log_softmax(1)).sum(1)
-
-
-def smx_entropy(x: torch.Tensor) -> torch.Tensor:
-    """Entropy of softmax distribution from softmax scores."""
-    return -(x * x.log()).sum(1)
 
 
 def pinball_loss_grad(y, yhat, q: float):
     return -q * (y > yhat) + (1 - q) * (y < yhat)
 
 
-def split_conformal(results_dict: dict, cal_path: str, alpha: float):
+def split_conformal(results: list, cal_path: str, alpha: float):
+    """Perform split conformal prediction and get conformal threshold"""
     # # # # # # # # CALIBRATION # # # # # # #
     print('Calibrating conformal')
 
@@ -58,11 +50,14 @@ def split_conformal(results_dict: dict, cal_path: str, alpha: float):
     print(f'Coverage on Calibration data: {cov_thr_in1k}')
     print(f'Inefficiency on Calibration data: {size_thr_in1k}')
 
+    results_dict = {}
+    results_dict['update'] = 'calibration'
     results_dict['cal_acc'] = acc_cal
     results_dict['cal_cov'] = cov_thr_in1k
     results_dict['cal_size'] = size_thr_in1k
+    results.append(results_dict)
 
-    return results_dict, tau_thr, upper_q, lower_q, cal_smx, cal_labels
+    return results, tau_thr, upper_q, lower_q, cal_smx, cal_labels
 
 
 def update_cp(output_ent, upper_q, cal_smx, cal_labels, alpha):
@@ -82,7 +77,7 @@ def update_cp_batch(output_ent, upper_q, cal_smx, cal_labels, alpha):
     # loss = pinball_loss_grad(upper_q, output_ent.cpu().detach().numpy(), 0.1).mean()
     # upper_q += loss
     upper_q = np.quantile(output_ent.cpu().detach().numpy(),
-                          1-alpha)  # using the 90th quantile of just batch not whole dist
+                          1 - alpha)  # using the 90th quantile of just batch not whole dist
     # Re-calibrate, using the calibration dataset, and the new entropy quantile
     tau_thr = cp.calibrate_threshold(cal_smx / upper_q, cal_labels,
                                      alpha)  # deflate scores by the entropy quantile
@@ -105,7 +100,7 @@ def t_to_sev(t, window, run_length=500, schedule=None):
     return 5 * ((t_base // run_length) % 2)  # default: sudden schedule
 
 
-def t2sev(t,  run_length=7, schedule=None):
+def t2sev(t, run_length=7, schedule=None):
     t_base = t
     if schedule == "gradual":
         k = (t_base // run_length) % 10
