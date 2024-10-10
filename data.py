@@ -26,16 +26,16 @@ def initializeRxrx1Transform():
 
 def get_data(data_name, args):
     if data_name == 'imagenet-r':
-        dataset = datasets.INr()
+        dataset = datasets.INr(args.model)
         mask = imagenet_r_mask
     elif data_name == 'imagenet-a':
-        dataset = datasets.INa()
+        dataset = datasets.INa(args.model)
         mask = indices_in_1k
     elif data_name == 'imagenet-v2':
-        dataset = datasets.INv2()
+        dataset = datasets.INv2(args.model)
         mask = None
     elif data_name == 'imagenet-c':
-        dataset = datasets.INc(args.corruption, args.severity)
+        dataset = datasets.INc(args.corruption, args.severity, args.model)
         mask = None
     elif data_name == 'rxrx1':
         transform = initializeRxrx1Transform()
@@ -73,10 +73,12 @@ def get_data(data_name, args):
         raise ValueError('Dataset not supported')
 
     if 'imagenet' in data_name:
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
+        dataloader = torch.utils.data.DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=4,
+                                                 pin_memory=True)
     elif data_name in ['rxrx1', 'iwildcam', 'fmow']:
         # dataloader = get_eval_loader("standard", dataset, batch_size=args.batch_size, num_workers=4)
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
+        dataloader = torch.utils.data.DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=4,
+                                                 pin_memory=True)
 
     else:
         raise ValueError('Dataset not supported')

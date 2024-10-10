@@ -1,25 +1,23 @@
 import argparse
-import csv
+import math
 from pathlib import Path
 
 import torch
-import torchvision
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-import pdb
 
 import data
+import eata
 import models
 import utils
-import tent
 from uncertainty_functions import logit_entropy
 import conformal_prediction as cp
 import evaluation
 
 
 def get_args_parser():
-    parser = argparse.ArgumentParser('TTA & Conformal Prediction Distribution Shift', add_help=False)
+    parser = argparse.ArgumentParser('EaCP and ECP Experiments', add_help=False)
 
     # data args
     parser.add_argument('--cal-path', type=str,
@@ -40,14 +38,26 @@ def get_args_parser():
     # parser.add_argument('--ucp', action='store_true', help='Updated the conformal threshold')
     # parser.add_argument('--tta', action='store_true', help='Perform TTA')
     parser.add_argument('--model', type=str, default='resnet50', help='Base neural network model')
+    parser.add_argument('--cp', type=str, default='thr', help='CP Method')
 
     parser.add_argument('--save-name', type=str, help='Name for results file')
+
+    # EATA TTA Hparams
+    parser.add_argument('--e-margin', type=float, default=1000,
+                        help='entropy margin E_0 in Eqn. (3) of EATA paper, for filtering reliable samples')
+    parser.add_argument('--e-margin-scale', type=float, default=0.4,
+                        help='hyperparameter for scaling margin, for EATA')
+
+    parser.add_argument('--d-margin', type=float, default=0.05,
+                        help='\epsilon in Eqn. (5) of EATA paper, for filtering redundant samples')
 
     return parser
 
 
 def evaluate(args):
     print(f'Working on {args.dataset}')
+
+    args.e_margin = math.log(args.e_margin) * args.e_margin_scale  # for EATA TTA
 
     results = []
     save_name = Path(args.save_name + '.csv')
@@ -59,11 +69,11 @@ def evaluate(args):
     save_loc = save_folder / save_name
 
     results, tau_thr, upper_q, lower_q, cal_smx, cal_labels = utils.split_conformal(results, args.cal_path,
-                                                                                    args.alpha)
+                                                                                    args.alpha, args.cp)
 
     dataloader, mask = data.get_data(data_name=args.dataset, args=args)
-
-    updates = ['none', 'tta', 'ucp', 'both']  # what (if any) updates to perform at test time
+    # what (if any) updates to perform at test time
+    updates = ['none', 'tta', 'ecp', 'eacp', 'naive']  # none is eq. to splitCP
 
     for update in updates:
         print(f'Working on update type: {update}')
@@ -73,19 +83,35 @@ def evaluate(args):
 
         if update == 'none':
             args.tta = False
-            args.ucp = False
+            args.ecp = False
+            args.naive = False
         elif update == 'tta':
             args.tta = True
-            args.ucp = False
-        elif update == 'ucp':
+            args.ecp = False
+            args.naive = False
+        elif update == 'ecp':
             args.tta = False
-            args.ucp = True
-        elif update == 'both':
+            args.ecp = True
+            args.naive = False
+        elif update == 'eacp':
             args.tta = True
-            args.ucp = True
-        print(f'TTA: {args.tta}\nUCP: {args.ucp}')
-        if args.tta:
-            model = setup_tent(model, mask)
+            args.ecp = True
+            args.naive = False
+        elif update == 'naive':
+            args.tta = False
+            args.ecp = False
+            args.naive = True
+        print(f'TTA: {args.tta}\nECP: {args.ecp}')
+
+        if args.tta:  # initialize model for test time adaptation
+            model = eata.configure_model(model)
+            params, param_names = eata.collect_params(model)
+            optimizer = torch.optim.SGD(params,
+                                        lr=args.lr,
+                                        momentum=args.momentum,
+                                        weight_decay=args.wd)
+
+            model = eata.EATA(model, optimizer, e_margin=args.e_margin, d_margin=args.d_margin, mask=mask)
         else:
             model.eval()
 
@@ -93,14 +119,14 @@ def evaluate(args):
         seen = 0
         cov = []
         sizes = []
-        ent_covs = []
+        ent_covs = []  # used to confirm that the entropy \beta quantile is actually achieved
         for batch in tqdm(dataloader):
             images, labels = batch[0], batch[1]
             images, labels = images.to(device), labels.to(device)
 
             outputs = model(images)
 
-            if (not args.tta) and (mask is not None):
+            if (not args.tta) and (mask is not None):  # mask for IN1k variants that use a subset of classes
                 outputs = outputs[:, mask]
 
             correct += (outputs.argmax(1) == labels).sum()
@@ -108,16 +134,28 @@ def evaluate(args):
 
             output_ent = logit_entropy(outputs)  # get entropy from logits
 
-            if args.ucp:  # update entropy quantile
-                upper_q, tau_thr = utils.update_cp_batch(output_ent, upper_q, cal_smx, cal_labels, args.alpha)
+            if args.ecp:  # update entropy quantile
+                upper_q, tau_thr = utils.update_cp_batch(output_ent, upper_q, cal_smx, cal_labels, args.alpha, args.cp)
+                # upper_q, tau_thr = utils.update_cp(output_ent, upper_q, cal_smx, cal_labels, args.alpha)
 
             ent_covs.append(((lower_q <= output_ent) & (output_ent <= upper_q)).sum() / len(output_ent))
 
-            if args.ucp:
-                # multiply by upper quantile to grow the softmax scores
-                cov_set = cp.predict_threshold(outputs.softmax(1).cpu().detach().numpy() * upper_q, tau_thr)
-            else:
+            if args.ecp:
+                if args.cp == 'thr':
+                    # multiply by upper quantile to grow the softmax scores
+                    # cov_set = cp.predict_threshold(outputs.softmax(1).cpu().detach().numpy() * upper_q, tau_thr)
+                    cov_set = cp.predict_threshold(outputs.softmax(1).cpu().detach().numpy(), tau_thr)
+                elif args.cp == 'raps':
+                    # divide the softmax score so the set is inflated
+                    cov_set = cp.predict_raps(outputs.softmax(1).cpu().detach().numpy() / upper_q, tau_thr, k_reg=7,
+                                              lambda_reg=0.5, rng=True)
+            elif args.naive:
+                cov_set = cp.predict_raps(outputs.softmax(1).cpu().detach().numpy(), 1 - args.alpha)
+            elif args.cp == 'thr':
                 cov_set = cp.predict_threshold(outputs.softmax(1).cpu().detach().numpy(), tau_thr)
+            elif args.cp == 'raps':
+                cov_set = cp.predict_raps(outputs.softmax(1).cpu().detach().numpy(), tau_thr, k_reg=5, lambda_reg=0.01,
+                                          rng=True)
 
             cov.append(float(evaluation.compute_coverage(cov_set, labels.cpu())))
             size, _ = evaluation.compute_size(cov_set)
@@ -138,34 +176,6 @@ def evaluate(args):
     results_df = pd.DataFrame(results)
     # Save the DataFrame to a CSV file
     results_df.to_csv(save_loc, index=False)
-
-    # with open(save_loc, 'w') as f:
-    #     w = csv.writer(f)
-    #     w.writerows(results.items())
-
-
-def setup_tent(model, mask=None):
-    """Set up tent adaptation.
-
-    Configure the model for training + feature modulation by batch statistics,
-    collect the parameters for feature modulation by gradient optimization,
-    set up the optimizer, and then tent the model.
-    """
-    model = tent.configure_model(model)
-    params, param_names = tent.collect_params(model)
-    optimizer = torch.optim.SGD(params,
-                                lr=args.lr,
-                                momentum=args.momentum,
-                                weight_decay=args.wd)
-
-    tent_model = tent.Tent(model, optimizer,
-                           steps=1,
-                           episodic=False,
-                           mask=mask)
-    print(f"model for adaptation: %s", model)
-    print(f"params for adaptation: %s", param_names)
-    print(f"optimizer for adaptation: %s", optimizer)
-    return tent_model
 
 
 if __name__ == '__main__':

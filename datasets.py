@@ -1,9 +1,11 @@
 from collections import defaultdict
 from pathlib import Path
+import glob
 
 from PIL import Image
 import torch
 import torchvision
+from torchvision.datasets.vision import VisionDataset
 import timm
 
 corruptions = [
@@ -297,8 +299,32 @@ test_transforms = torchvision.transforms.Compose([
                                      std=[0.229, 0.224, 0.225]),
 ])
 
+test_transforms_inc = torchvision.transforms.Compose([
+    torchvision.transforms.CenterCrop(224),
+    torchvision.transforms.ToTensor(),
+    torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225]),
+])
 
-# set up imagenet V2 loader
+test_transforms_vit = torchvision.transforms.Compose([
+    torchvision.transforms.Resize(size=248, interpolation=torchvision.transforms.functional.InterpolationMode.BICUBIC,
+                                  max_size=None, antialias=None),
+    torchvision.transforms.CenterCrop(224),
+    torchvision.transforms.ToTensor(),
+    torchvision.transforms.Normalize(mean=[0.500, 0.500, 0.500],
+                                     std=[0.500, 0.500, 0.500]),
+])
+
+
+test_transforms_inc_vit = torchvision.transforms.Compose([
+    torchvision.transforms.CenterCrop(224),
+    torchvision.transforms.ToTensor(),
+    torchvision.transforms.Normalize(mean=[0.500, 0.500, 0.500],
+                                     std=[0.500, 0.500, 0.500]),
+])
+
+
+# set up imagenet V2 dataset
 class ImageNetV2(torch.utils.data.Dataset):
     def __init__(self, root, transform):
         self.root = Path(root)
@@ -316,12 +342,88 @@ class ImageNetV2(torch.utils.data.Dataset):
         return img, label
 
 
-def INc_stream_mixed(tta_adapt: bool = False):
+# set up objectnet dataset
+class ObjectNetDataset(VisionDataset):
+    """
+    ObjectNet dataset.
+
+    Args:
+        root (string): Root directory where images are downloaded to. The images can be grouped in folders. (the folder structure will be ignored)
+        transform (callable, optional): A function/transform that  takes in an PIL image
+            and returns a transformed version. E.g, 'transforms.ToTensor'
+        target_transform (callable, optional): A function/transform that takes in the
+            target and transforms it.
+        img_format (string): jpg
+                             png - the original ObjectNet images are in png format
+    """
+
+    def __init__(self, root, transform=None, target_transform=None, transforms=None, img_format="jpg"):
+        """Init ObjectNet pytorch dataloader."""
+        super(ObjectNetDataset, self).__init__(root, transforms, transform, target_transform)
+
+        self.loader = self.pil_loader
+        self.img_format = img_format
+        files = glob.glob(root + "/**/*." + img_format, recursive=True)
+        self.pathDict = {}
+        for f in files:
+            self.pathDict[f.split("/")[-1]] = f
+        self.imgs = list(self.pathDict.keys())
+
+    def __getitem__(self, index):
+        """
+        Get an image and its label.
+
+        Args:
+            index (int): Index
+        Returns:
+            tuple: Tuple (image, target). target is the image file name
+        """
+        img, target = self.getImage(index)
+        if self.transforms is not None:
+            img, target = self.transforms(img, target)
+
+        return img, target
+
+    def getImage(self, index):
+        """
+        Load the image and its label.
+
+        Args:
+            index (int): Index
+        Return:
+            tuple: Tuple (image, target). target is the image file name
+        """
+        img = self.loader(self.pathDict[self.imgs[index]])
+
+        # crop out red border
+        width, height = img.size
+        cropArea = (2, 2, width - 2, height - 2)
+        img = img.crop(cropArea)
+        return (img, self.imgs[index])
+
+    def __len__(self):
+        """Get the number of ObjectNet images to load."""
+        return len(self.imgs)
+
+    def pil_loader(self, path):
+        """Pil image loader."""
+        # open path as file to avoid ResourceWarning (https://github.com/python-pillow/Pillow/issues/835)
+        with open(path, 'rb') as f:
+            img = Image.open(f)
+            return img.convert('RGB')
+
+
+def INc_stream_mixed(model):
     """
     This function concats ImageNet-C corruption types together into matching severity levels [1,5]
 
     :return:
     """
+    if 'resnet' or 'deit' in model:
+        transform = test_transforms_inc
+    else:
+        transform = test_transforms_inc_vit
+
     sev_datasets = defaultdict(list)  # keys = severity levels, values = corruption type datasets (at that sev level)
     for sev in range(0, 6):  # severity levels from 1 - 5
         if sev == 0:
@@ -332,7 +434,7 @@ def INc_stream_mixed(tta_adapt: bool = False):
             for cor in corruptions:
                 data_path = data_dirs['INc'] + cor + '/' + str(sev) + '/'
                 data = torchvision.datasets.ImageFolder(root=data_path,
-                                                        transform=None if tta_adapt else test_transforms)
+                                                        transform=transform)
                 sev_datasets[sev].append(data)
 
     datasets = {}
@@ -344,54 +446,72 @@ def INc_stream_mixed(tta_adapt: bool = False):
     return datasets
 
 
-def INc_stream_single(corr_type):
+def INc_stream_single(corr_type, model):
     """
     This function samples severity levels [1,5] from a single ImageNet-C corruption type
 
     :return:
     """
+    if 'resnet' or 'deit' in model:
+        transform = test_transforms_inc
+    else:
+        transform = test_transforms_inc_vit
+
     sev_datasets = {}  # keys = severity levels, values = corruption type datasets (at that sev level)
     for sev in range(1, 6):  # severity levels from 1 - 5
         data_path = data_dirs['INc'] + corr_type + '/' + str(sev) + '/'
         data = torchvision.datasets.ImageFolder(root=data_path,
-                                                transform=test_transforms)
+                                                transform=transform)
 
         sev_datasets[sev] = data
 
     return sev_datasets
 
 
-def INc(type: str, severity: int):
+def INc(type: str, severity: int, model):
+    if 'resnet' or 'deit' in model:
+        transform = test_transforms_inc
+    else:
+        transform = test_transforms_inc_vit
+
     print(f'Working on ImageNet-C:  {type} Severity {severity}')
     imagenet_contrast_data = torchvision.datasets.ImageFolder(
-        root=data_dirs['INc'] + type + '/' + str(severity) + '/', transform=test_transforms)
+        root=data_dirs['INc'] + type + '/' + str(severity) + '/', transform=transform)
     return imagenet_contrast_data
 
 
-def INv2():
+def INv2(model):
+    if 'resnet' in model:
+        transform = test_transforms
+    else:
+        transform = test_transforms_vit
+
     print('Working on ImageNet-v2')
-    # now ImageNet-A
-    imagenet_v2_data = ImageNetV2(root=data_dirs['INv2'], transform=test_transforms)
+    # now ImageNet-v2
+    imagenet_v2_data = ImageNetV2(root=data_dirs['INv2'], transform=transform)
     # imagenet_a_loader = torch.utils.data.DataLoader(imagenet_a_data, batch_size=128, shuffle=False)
 
     return imagenet_v2_data
 
 
-def INa():
+def INa(model):
     """
     Save inference results on imagenet-a dataset
 
     """
-
+    if 'resnet' in model:
+        transform = test_transforms
+    else:
+        transform = test_transforms_vit
     print('Working on ImageNet-A')
     # now ImageNet-A
-    imagenet_a_data = torchvision.datasets.ImageFolder(root=data_dirs['INa'], transform=test_transforms)
+    imagenet_a_data = torchvision.datasets.ImageFolder(root=data_dirs['INa'], transform=transform)
     # imagenet_a_loader = torch.utils.data.DataLoader(imagenet_a_data, batch_size=128, shuffle=False)
 
     return imagenet_a_data
 
 
-def INr():
+def INr(model):
     """
     Save inference results on imagenet-r dataset
 
@@ -400,15 +520,24 @@ def INr():
         transform: torchvision.transform for this dataset
         model: torchvision model used for inference
     """
+    if 'resnet' in model:
+        transform = test_transforms
+    else:
+        transform = test_transforms_vit
 
     print('Working on ImageNet-R')
     # IN-R
-    imagenet_r_data = torchvision.datasets.ImageFolder(root=data_dirs['INr'], transform=test_transforms)
+    imagenet_r_data = torchvision.datasets.ImageFolder(root=data_dirs['INr'], transform=transform)
 
     return imagenet_r_data
 
 
-def IN1k():
-    imagenet_1k_data = torchvision.datasets.ImageFolder(root=data_dirs['IN1k'], transform=test_transforms)
+def IN1k(model):
+    if 'resnet' in model:
+        transform = test_transforms
+    else:
+        transform = test_transforms_vit
+
+    imagenet_1k_data = torchvision.datasets.ImageFolder(root=data_dirs['IN1k'], transform=transform)
 
     return imagenet_1k_data

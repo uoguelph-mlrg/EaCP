@@ -1,3 +1,6 @@
+"""
+Here we implement some CP / training helper functions.
+"""
 import numpy as np
 import torch.nn
 import torchvision
@@ -11,7 +14,7 @@ def pinball_loss_grad(y, yhat, q: float):
     return -q * (y > yhat) + (1 - q) * (y < yhat)
 
 
-def split_conformal(results: list, cal_path: str, alpha: float):
+def split_conformal(results: list, cal_path: str, alpha: float, cp_method: 'str'):
     """Perform split conformal prediction and get conformal threshold"""
     # # # # # # # # CALIBRATION # # # # # # #
     print('Calibrating conformal')
@@ -39,9 +42,21 @@ def split_conformal(results: list, cal_path: str, alpha: float):
     # evaluate accuracy
     acc_cal = evaluation.compute_accuracy(val_smx, val_labels)
     # calibrate on imagenet calibration set
-    tau_thr = cp.calibrate_threshold(cal_smx, cal_labels, alpha)  # get conformal quantile
+    if cp_method == 'thr':
+        tau_thr = cp.calibrate_threshold(cal_smx, cal_labels, alpha)  # get conformal quantile
+    elif cp_method == 'raps':
+        tau_thr = cp.calibrate_raps(cal_smx, cal_labels, alpha, k_reg=5, lambda_reg=0.01, rng=True)
+    else:
+        raise ValueError('CP method not supported choose from [thr, raps]')
+
     # get confidence sets
-    conf_set_thr = cp.predict_threshold(val_smx, tau_thr)
+    if cp_method == 'thr':
+        conf_set_thr = cp.predict_threshold(val_smx, tau_thr)
+    elif cp_method == 'raps':
+        conf_set_thr = cp.predict_raps(val_smx, tau_thr, k_reg=5, lambda_reg=0.01, rng=True)
+    else:
+        raise ValueError('CP method not supported choose from [thr, raps]')
+
     # evaluate coverage
     cov_thr_in1k = float(evaluation.compute_coverage(conf_set_thr, val_labels))
     # evaluate set size
@@ -60,29 +75,43 @@ def split_conformal(results: list, cal_path: str, alpha: float):
     return results, tau_thr, upper_q, lower_q, cal_smx, cal_labels
 
 
-def update_cp(output_ent, upper_q, cal_smx, cal_labels, alpha):
+def update_cp(output_ent, upper_q, cal_smx, cal_labels, alpha, cp_method):
     # adjust the entropy quantile to ensure entropy coverage
     loss = pinball_loss_grad(upper_q, output_ent.cpu().detach().numpy(), alpha).mean()
     upper_q += loss
 
     # Re-calibrate, using the calibration dataset, and the new entropy quantile
-    tau_thr = cp.calibrate_threshold(cal_smx / upper_q, cal_labels,
-                                     alpha)  # deflate scores by the entropy quantile
+    if cp_method == 'thr':
+        tau = cp.calibrate_threshold(cal_smx / upper_q, cal_labels,
+                                         alpha)  # deflate scores by the entropy quantile
+    elif cp_method == 'raps':
+        # here inflate scores by the entropy quantile to make the threshold wider
+        tau = cp.calibrate_raps(cal_smx * upper_q, cal_labels,
+                                alpha, k_reg=7, lambda_reg=0.5, rng=True)
+    else:
+        raise ValueError('CP method not supported choose from [thr, raps]')
 
-    return upper_q, tau_thr
+    return upper_q, tau
 
 
-def update_cp_batch(output_ent, upper_q, cal_smx, cal_labels, alpha):
+def update_cp_batch(output_ent, upper_q, cal_smx, cal_labels, alpha, cp_method):
     # adjust the entropy quantile to ensure entropy coverage
     # loss = pinball_loss_grad(upper_q, output_ent.cpu().detach().numpy(), 0.1).mean()
     # upper_q += loss
     upper_q = np.quantile(output_ent.cpu().detach().numpy(),
                           1 - alpha)  # using the 90th quantile of just batch not whole dist
     # Re-calibrate, using the calibration dataset, and the new entropy quantile
-    tau_thr = cp.calibrate_threshold(cal_smx / upper_q, cal_labels,
+    if cp_method == 'thr':
+        tau = cp.calibrate_threshold(cal_smx / (upper_q ** 2), cal_labels,
                                      alpha)  # deflate scores by the entropy quantile
+    elif cp_method == 'raps':
+        # here inflate scores by the entropy quantile to make the threshold wider
+        tau = cp.calibrate_raps(cal_smx * upper_q, cal_labels,
+                                alpha, k_reg=7, lambda_reg=0.5, rng=True)
+    else:
+        raise ValueError('CP method not supported choose from [thr, raps]')
 
-    return upper_q, tau_thr
+    return upper_q, tau
 
 
 def t_to_sev(t, window, run_length=500, schedule=None):
