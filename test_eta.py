@@ -35,6 +35,8 @@ def get_args_parser():
                         help='Scaling factor for entropy quantile; refer to Sec 4.3')
     parser.add_argument('--alpha', type=float, default=0.1, help='Desired error rate (cov=1-alpha)')
     parser.add_argument('--cp', type=str, default='thr', help='CP Method')
+    parser.add_argument('-updates', '--list', nargs='+', default=['none', 'tta', 'ecp', 'eacp', 'naive'],
+                        help='What (if any) updates to perform at test time; none is eq. to splitCP',)
 
     # training args
     parser.add_argument('--batch-size', type=int, default=64, help='Batch size for TTA')
@@ -72,10 +74,8 @@ def evaluate(args):
                                                                            args.alpha, args.cp)
 
     dataloader, mask = loader.get_data(data_name=args.dataset, args=args)
-    # what (if any) updates to perform at test time
-    updates = ['none', 'tta', 'ecp', 'eacp', 'naive']  # none is eq. to splitCP
 
-    for update in updates:
+    for update in args.updates:
         print(f'Working on update type: {update}')
         model = models.get_model(args.dataset, args.model)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -172,7 +172,7 @@ def evaluate(args):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser('TTA & Conformal Prediction Distribution Shift',
+    parser = argparse.ArgumentParser('Entropy Adapted CP',
                                      parents=[get_args_parser()])
     args = parser.parse_args()
     evaluate(args)
