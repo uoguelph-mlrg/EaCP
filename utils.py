@@ -3,19 +3,40 @@ Here we implement some CP / training helper functions.
 """
 import numpy as np
 import torch.nn
-import torchvision
+import torch
 
 import conformal_prediction as cp
 from uncertainty_functions import smx_entropy
 import evaluation
 
 
-def pinball_loss_grad(y, yhat, q: float):
+def pinball_loss_grad(y: float, yhat: np.ndarray, q: float) -> np.ndarray:
+    """
+    Compute the gradient of the pinball loss function.
+
+    :param y: True values.
+    :param yhat: Predicted values.
+    :param q: Quantile level for the loss calculation.
+    :return: Gradient of the pinball loss.
+    """
     return -q * (y > yhat) + (1 - q) * (y < yhat)
 
 
-def split_conformal(results: list, cal_path: str, alpha: float, cp_method: 'str'):
-    """Perform split conformal prediction and get conformal threshold"""
+def split_conformal(results: list[dict],
+                    cal_path: str,
+                    alpha: float,
+                    cp_method: str) -> tuple[list[dict], float, float, float, np.ndarray, np.ndarray]:
+    """
+    Perform split conformal prediction and obtain the conformal threshold.
+
+    :param results: List of dicts that will store metrics of interest.
+    :param cal_path: Path to saved softmax outputs / labels from the calibration dataset.
+    :param alpha: Target error level for conformal prediction; coverage is 1 - alpha.
+    :param cp_method: Which cp method to use
+    :param cp_method: The conformal prediction method to use ('thr' or 'raps').
+    :return: Updated results list, conformal threshold (tau_thr), upper and lower entropy quantiles (upper_q, lower_q),
+             and the calibration softmax scores and labels (cal_smx, cal_labels).
+    """
     # # # # # # # # CALIBRATION # # # # # # #
     print('Calibrating conformal')
 
@@ -33,6 +54,12 @@ def split_conformal(results: list, cal_path: str, alpha: float, cp_method: 'str'
 
     # find quantiles for the entropy of the prediction distribution
     cal_ent, val_ent = smx_entropy(torch.Tensor(cal_smx)).numpy(), smx_entropy(torch.Tensor(val_smx)).numpy()
+    # In split conformal regression, the prediction interval is constructed such that it covers the true value with
+    # probability 1 - alpha. To achieve this, the interval bounds are set as quantiles of the calibration residuals,
+    # where the lower bound corresponds to alpha/2 and the upper bound to 1 - alpha/2. This ensures symmetric coverage
+    # around the true value, providing a balanced prediction interval.
+    # NOTE THAT our method does not use the lower bound, only the upper bound corresponding to \beta=1-\alpha
+    # See Eq. 3 in the paper. lower_q is not necessary for out methods; upper_q can serve as an initial starting point
     lower_q = np.quantile(cal_ent, alpha / 2)
     upper_q = np.quantile(cal_ent, 1 - alpha / 2)
     # use this to form a prediction interval & check coverage
@@ -65,71 +92,55 @@ def split_conformal(results: list, cal_path: str, alpha: float, cp_method: 'str'
     print(f'Coverage on Calibration data: {cov_thr_in1k}')
     print(f'Inefficiency on Calibration data: {size_thr_in1k}')
 
-    results_dict = {}
-    results_dict['update'] = 'calibration'
-    results_dict['cal_acc'] = acc_cal
-    results_dict['cal_cov'] = cov_thr_in1k
-    results_dict['cal_size'] = size_thr_in1k
+    results_dict = {
+        'update': 'calibration',
+        'cal_acc': acc_cal,
+        'cal_cov': cov_thr_in1k,
+        'cal_size': size_thr_in1k
+    }
     results.append(results_dict)
 
     return results, tau_thr, upper_q, lower_q, cal_smx, cal_labels
 
 
-def update_cp(output_ent, upper_q, cal_smx, cal_labels, alpha, cp_method):
-    # adjust the entropy quantile to ensure entropy coverage
-    loss = pinball_loss_grad(upper_q, output_ent.cpu().detach().numpy(), alpha).mean()
-    upper_q += loss
+def update_beta_online(output_ent: torch.Tensor, beta: float, alpha: float) -> float:
+    """
+    Update the estimated \beta entropy quantile online for use in adapting the conformal prediction threshold, see
+    Eq. 3 of the paper.
 
-    # Re-calibrate, using the calibration dataset, and the new entropy quantile
-    if cp_method == 'thr':
-        tau = cp.calibrate_threshold(cal_smx / upper_q, cal_labels,
-                                         alpha)  # deflate scores by the entropy quantile
-    elif cp_method == 'raps':
-        # here inflate scores by the entropy quantile to make the threshold wider
-        tau = cp.calibrate_raps(cal_smx * upper_q, cal_labels,
-                                alpha, k_reg=7, lambda_reg=0.5, rng=True)
-    else:
-        raise ValueError('CP method not supported choose from [thr, raps]')
+    :param output_ent: Entropy of the output predictions.
+    :param beta: Entropy quantile estimate.
+    :param alpha: Target error level (1 - alpha = coverage).
+    :return: Updated entropy quantile.
+    """
+    # update the beta entropy quantile using pinball loss
+    loss = pinball_loss_grad(beta, output_ent.cpu().detach().numpy(), alpha).mean()
+    beta += loss
 
-    return upper_q, tau
+    return beta
 
 
-def update_cp_batch(output_ent, upper_q, cal_smx, cal_labels, alpha, cp_method):
-    # adjust the entropy quantile to ensure entropy coverage
-    # loss = pinball_loss_grad(upper_q, output_ent.cpu().detach().numpy(), 0.1).mean()
-    # upper_q += loss
-    upper_q = np.quantile(output_ent.cpu().detach().numpy(),
-                          1 - alpha)  # using the 90th quantile of just batch not whole dist
-    # Re-calibrate, using the calibration dataset, and the new entropy quantile
-    if cp_method == 'thr':
-        tau = cp.calibrate_threshold(cal_smx / (upper_q ** 2), cal_labels,
-                                     alpha)  # deflate scores by the entropy quantile
-    elif cp_method == 'raps':
-        # here inflate scores by the entropy quantile to make the threshold wider
-        tau = cp.calibrate_raps(cal_smx * upper_q, cal_labels,
-                                alpha, k_reg=7, lambda_reg=0.5, rng=True)
-    else:
-        raise ValueError('CP method not supported choose from [thr, raps]')
+def update_beta_batch(output_ent: torch.Tensor, alpha: float) -> float:
+    """
+    Instead of updating the \beta quantile online, we can simply use the entropy quantile on a particular batch of data
+    (or the entire dataset if available). On a large enough batch size, the difference with online estimate is
+    negligible.
 
-    return upper_q, tau
+    :param output_ent: Entropy of the output predictions.
+    :param alpha: Target error level (1 - alpha = coverage).
+    :return: Entropy quantile of the batch / dataset.
+    """
 
+    # Find the entropy quantile on the batch of data
+    upper_q = np.quantile(output_ent.cpu().detach().numpy(), 1 - alpha)
 
-def t_to_sev(t, window, run_length=500, schedule=None):
-    if t < window or schedule in [None, "None", "none"]:
-        return 0
-    t_base = t - window // 2
-    if schedule == "gradual":
-        k = (t_base // run_length) % 10
-        return k if k <= 5 else 10 - k
-    if schedule == "random_sudden":
-        return np.clip(np.random.randint(0, 10) * ((t_base // run_length) % 2), 0, 5)
-    if schedule == "random_gradual":
-        k = (((t_base * abs(np.random.uniform(1, 1.5))) // run_length) % 10)
-        return (k if k <= 5 else 10 - k) * np.random.randint(1, 2)
-    return 5 * ((t_base // run_length) % 2)  # default: sudden schedule
+    return upper_q
 
 
 def t2sev(t, run_length=7, schedule=None):
+    """
+    Time step to severity level, for continious shifts.
+    """
     t_base = t
     if schedule == "gradual":
         k = (t_base // run_length) % 10

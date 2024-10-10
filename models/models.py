@@ -34,7 +34,7 @@ def get_model(data_name: str, model_name: str) -> torch.nn.Module:
                 'Neural Net Model not supported. Choose from: resnet50, resnet152, deit3B, deit3S, vitB, vitS')
 
     elif data_name == 'rxrx1':
-        weights = torch.load(r'/scratch/ssd004/scratch/kkasa/trained_models/rxrx1/rxrx1_seed:0_epoch:best_model.pth')[
+        weights = torch.load(r'trained_models/rxrx1/rxrx1_seed:0_epoch:best_model.pth')[
             'algorithm']
 
         for key in list(weights.keys()):
@@ -46,7 +46,7 @@ def get_model(data_name: str, model_name: str) -> torch.nn.Module:
 
         model.load_state_dict(weights, strict=True)
     elif data_name == 'iwildcam':
-        weights = torch.load(r'/scratch/ssd004/scratch/kkasa/trained_models/iwildcam/best_model.pth')['algorithm']
+        weights = torch.load(r'trained_models/iwildcam/best_model.pth')['algorithm']
 
         for key in list(weights.keys()):
             weights[key.removeprefix('model.')] = weights.pop(key)
@@ -57,7 +57,7 @@ def get_model(data_name: str, model_name: str) -> torch.nn.Module:
 
         model.load_state_dict(weights, strict=True)
     elif data_name == 'fmow':
-        weights = torch.load(r'/scratch/ssd004/scratch/kkasa/trained_models/fmow/fmow_seed:0_epoch:best_model.pth')[
+        weights = torch.load(r'trained_models/fmow/fmow_seed:0_epoch:best_model.pth')[
             'algorithm']
         for key in list(weights.keys()):
             weights[key.removeprefix('model.')] = weights.pop(key)

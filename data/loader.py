@@ -1,14 +1,16 @@
+"""
+Returns pytorch dataloaders for selected dataset
+"""
 import torch
 import torchvision
 import torchvision.transforms as transforms
 import wilds
-from wilds.common.data_loaders import get_eval_loader
 
 import datasets
 from datasets import imagenet_r_mask, indices_in_1k
 
 
-def initializeRxrx1Transform():
+def initializeRxrx1Transform() -> transforms.Compose:
     def standardize(x: torch.Tensor) -> torch.Tensor:
         mean = x.mean(dim=(1, 2))
         std = x.std(dim=(1, 2))
@@ -24,7 +26,16 @@ def initializeRxrx1Transform():
     return transforms.Compose(transforms_ls)
 
 
-def get_data(data_name, args):
+def get_data(data_name: str, args) -> tuple[torch.utils.data.DataLoader, list]:
+    """
+    Retrieve the specified dataset and its associated dataloader.
+
+    :param data_name: Name of the dataset to load (e.g., 'imagenet-r', 'imagenet-a', etc.).
+    :param args: Arguments containing model specifications and batch size.
+    :return: A tuple containing the dataloader for the dataset and an optional mask.
+    :raises ValueError: If the specified dataset is not supported.
+    """
+
     if data_name == 'imagenet-r':
         dataset = datasets.INr(args.model)
         mask = imagenet_r_mask
@@ -40,7 +51,7 @@ def get_data(data_name, args):
     elif data_name == 'rxrx1':
         transform = initializeRxrx1Transform()
         base_dataset = wilds.get_dataset('rxrx1', download=False,
-                                         root_dir=r'/scratch/ssd004/scratch/kkasa/code/OnlineCP/data/', )
+                                         root_dir=r'/data/', )
         dataset = base_dataset.get_subset(
             "test",
             transform=transform
@@ -72,15 +83,7 @@ def get_data(data_name, args):
     else:
         raise ValueError('Dataset not supported')
 
-    if 'imagenet' in data_name:
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=4,
-                                                 pin_memory=True)
-    elif data_name in ['rxrx1', 'iwildcam', 'fmow']:
-        # dataloader = get_eval_loader("standard", dataset, batch_size=args.batch_size, num_workers=4)
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=4,
-                                                 pin_memory=True)
-
-    else:
-        raise ValueError('Dataset not supported')
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=4,
+                                             pin_memory=True)
 
     return dataloader, mask
