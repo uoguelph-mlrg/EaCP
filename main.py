@@ -35,7 +35,7 @@ def get_args_parser():
                         help='Scaling factor for entropy quantile; refer to Sec 4.3')
     parser.add_argument('--alpha', type=float, default=0.1, help='Desired error rate (cov=1-alpha)')
     parser.add_argument('--cp', type=str, default='thr', help='CP Method')
-    parser.add_argument('-updates', '--list', nargs='+', default=['none', 'tta', 'ecp', 'eacp', 'naive'],
+    parser.add_argument('--updates', '--list', nargs='+', default=['none', 'tta', 'ecp', 'eacp', 'naive'],
                         help='What (if any) updates to perform at test time; none is eq. to splitCP',)
 
     # training args
