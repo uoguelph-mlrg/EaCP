@@ -39,7 +39,7 @@ Run main.py to run adaptation techniques on a desired dataset.
 **Example:** Replicating results on ImageNet-v2. 
 
 ```
-python main.py --dataset imagenet-v2 --model resnet50 --save-name resnet50_results --lr 0.00025 --cal-path /scratch/ssd004/scratch/kkasa/inference_results/IN1k/imagenet-resnet50.npz --scaling-factor 2 --alpha 0.1 --updates none tta ecp eacl
+python main.py --dataset imagenet-v2 --model resnet50 --save-name resnet50_results --lr 0.00025 --cal-path /scratch/ssd004/scratch/kkasa/inference_results/IN1k/imagenet-resnet50.npz --scaling-factor 2 --alpha 0.1 --updates none tta ecp eacp
 ```
 
 ## Acknowledgment
