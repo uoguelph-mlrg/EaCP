@@ -70,8 +70,7 @@ def evaluate(args):
     save_folder.mkdir(parents=True, exist_ok=True)
     save_loc = save_folder / save_name
 
-    results, tau_thr, beta, _, cal_smx, cal_labels = utils.split_conformal(results, args.cal_path,
-                                                                           args.alpha, args.cp)
+    results, tau_thr = utils.split_conformal(results, args.cal_path, args.alpha, args.cp)
 
     dataloader, mask = loader.get_data(data_name=args.dataset, args=args)
 
