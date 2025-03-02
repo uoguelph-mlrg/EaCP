@@ -17,6 +17,7 @@ def pinball_loss_grad(y: float, yhat: np.ndarray, q: float) -> np.ndarray:
     :param y: True values.
     :param yhat: Predicted values.
     :param q: Quantile level for the loss calculation.
+    
     :return: Gradient of the pinball loss.
     """
     return -q * (y > yhat) + (1 - q) * (y < yhat)
@@ -34,8 +35,8 @@ def split_conformal(results: list[dict],
     :param alpha: Target error level for conformal prediction; coverage is 1 - alpha.
     :param cp_method: Which cp method to use
     :param cp_method: The conformal prediction method to use ('thr' or 'raps').
-    :return: Updated results list, conformal threshold (tau_thr), upper and lower entropy quantiles (upper_q, lower_q),
-             and the calibration softmax scores and labels (cal_smx, cal_labels).
+    
+    :return: Updated results list and conformal threshold (tau_thr).
     """
     # # # # # # # # CALIBRATION # # # # # # #
     print('Calibrating conformal')
@@ -97,6 +98,7 @@ def update_beta_online(output_ent: torch.Tensor, beta: float, alpha: float) -> f
     :param output_ent: Entropy of the output predictions.
     :param beta: Entropy quantile estimate.
     :param alpha: Target error level (1 - alpha = coverage).
+    
     :return: Updated entropy quantile.
     """
     # update the beta entropy quantile using pinball loss
