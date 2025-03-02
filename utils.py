@@ -25,7 +25,7 @@ def pinball_loss_grad(y: float, yhat: np.ndarray, q: float) -> np.ndarray:
 def split_conformal(results: list[dict],
                     cal_path: str,
                     alpha: float,
-                    cp_method: str) -> tuple[list[dict], float, float, float, np.ndarray, np.ndarray]:
+                    cp_method: str) -> tuple[list[dict], float]:
     """
     Perform split conformal prediction and obtain the conformal threshold.
 
@@ -51,20 +51,6 @@ def split_conformal(results: list[dict],
     np.random.shuffle(idx)
     cal_smx, val_smx = smx[idx, :], smx[~idx, :]
     cal_labels, val_labels = labels[idx], labels[~idx]
-
-    # find quantiles for the entropy of the prediction distribution
-    cal_ent, val_ent = smx_entropy(torch.Tensor(cal_smx)).numpy(), smx_entropy(torch.Tensor(val_smx)).numpy()
-    # In split conformal regression, the prediction interval is constructed such that it covers the true value with
-    # probability 1 - alpha. To achieve this, the interval bounds are set as quantiles of the calibration residuals,
-    # where the lower bound corresponds to alpha/2 and the upper bound to 1 - alpha/2. This ensures symmetric coverage
-    # around the true value, providing a balanced prediction interval.
-    # NOTE THAT our method does not use the lower bound, only the upper bound corresponding to \beta=1-\alpha
-    # See Eq. 3 in the paper. lower_q is not necessary for out methods; upper_q can serve as an initial starting point
-    lower_q = np.quantile(cal_ent, alpha / 2)
-    upper_q = np.quantile(cal_ent, 1 - alpha / 2)
-    # use this to form a prediction interval & check coverage
-    pred_int = ((lower_q <= val_ent) & (val_ent <= upper_q)).sum()  # entropy should be within these quantiles
-    print(f'Entropy Coverage on validation set: {pred_int / len(val_ent)}')
 
     # evaluate accuracy
     acc_cal = evaluation.compute_accuracy(val_smx, val_labels)
@@ -100,7 +86,7 @@ def split_conformal(results: list[dict],
     }
     results.append(results_dict)
 
-    return results, tau_thr, upper_q, lower_q, cal_smx, cal_labels
+    return results, tau_thr
 
 
 def update_beta_online(output_ent: torch.Tensor, beta: float, alpha: float) -> float:
